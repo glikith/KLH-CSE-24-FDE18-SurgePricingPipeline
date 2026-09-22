@@ -1,0 +1,10 @@
+*.db
+*.sqlite3
+.env
+secret_keys.json
+venv/
+__pycache__/
+kafka/
+*.pyc
+.DS_Store
+*.log

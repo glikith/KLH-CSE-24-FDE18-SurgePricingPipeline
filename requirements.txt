@@ -1,0 +1,6 @@
+geopandas==1.0.1
+shapely==2.0.6
+kafka-python==2.0.2
+python-dateutil==2.9.0.post0
+great_expectations==1.23.1
+pandas>=2.0.0
