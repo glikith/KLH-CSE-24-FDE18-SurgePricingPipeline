@@ -6,11 +6,9 @@ NYC zone boundaries (from the TLC shapefile), and publishes them to
 Kafka as JSON. This mimics a live ride-hailing event stream without
 depending on an external API.
 
-Points are generated within the real bounding box of all zones, then
-resolved to an actual zone via point-in-polygon lookup. Points that
-land outside every zone (gaps/water areas within the bounding box) are
-retried up to MAX_RETRIES times, then skipped -- this is expected
-real-world behavior, not a bug.
+Simulates dynamic, rotating demand surges across 10 major NYC hubs,
+switching randomly every 30 seconds so multiple zones experience
+surge pricing, peak transitions, and cooldowns.
 
 Usage:
     python src/synthetic_producer.py
@@ -24,17 +22,45 @@ from datetime import datetime, timezone
 
 from kafka import KafkaProducer
 
-from zone_lookup import latlon_to_zone, get_bounds
+from zone_lookup import get_bounds, latlon_to_zone
 
 # --- Config ------------------------------------------------------------
 KAFKA_BOOTSTRAP_SERVERS = "localhost:9092"
 KAFKA_TOPIC = "ride-events"
 
-EVENTS_PER_SECOND = 4.0   # throttle: 1 event every 2 seconds on average
+EVENTS_PER_SECOND = 4.0   # Generates enough throughput to hit 10 & 20 rolling thresholds
 BASE_FARE_MIN = 5.0
 BASE_FARE_MAX = 45.0
-MAX_RETRIES = 10          # retries per event to find a point inside a real zone
+MAX_RETRIES = 10          # Retries per event to find a point inside a real zone
+
+# 10 Major NYC Demand Hotspots
+HOTSPOTS = [
+    {"name": "JFK Airport", "lat": (40.640, 40.655), "lon": (-73.795, -73.770)},
+    {"name": "LaGuardia Airport", "lat": (40.770, 40.780), "lon": (-73.880, -73.865)},
+    {"name": "Midtown Manhattan / Times Square", "lat": (40.750, 40.760), "lon": (-73.990, -73.980)},
+    {"name": "Financial District", "lat": (40.705, 40.715), "lon": (-74.015, -74.005)},
+    {"name": "Williamsburg", "lat": (40.710, 40.722), "lon": (-73.965, -73.950)},
+    {"name": "Downtown Brooklyn / DUMBO", "lat": (40.695, 40.705), "lon": (-73.995, -73.985)},
+    {"name": "Long Island City", "lat": (40.742, 40.753), "lon": (-73.952, -73.938)},
+    {"name": "Upper East Side", "lat": (40.770, 40.782), "lon": (-73.960, -73.948)},
+    {"name": "Greenwich Village / SoHo", "lat": (40.725, 40.735), "lon": (-74.005, -73.993)},
+    {"name": "Astoria", "lat": (40.762, 40.775), "lon": (-73.930, -73.915)},
+]
+
+HOTSPOT_SWITCH_INTERVAL_SEC = 30  # Switch target hotspot randomly every 30 seconds
+current_hotspot = random.choice(HOTSPOTS)
+last_hotspot_switch = time.time()
 # -------------------------------------------------------------------------
+
+
+def update_hotspot_if_needed():
+    """Randomly selects a new active hotspot every HOTSPOT_SWITCH_INTERVAL_SEC."""
+    global current_hotspot, last_hotspot_switch
+    now = time.time()
+    if now - last_hotspot_switch >= HOTSPOT_SWITCH_INTERVAL_SEC:
+        current_hotspot = random.choice(HOTSPOTS)
+        last_hotspot_switch = now
+        print(f"\n[SURGE SHIFT] Demand spike moved randomly to: {current_hotspot['name']}")
 
 
 def random_point_in_bounds(bounds):
@@ -46,13 +72,16 @@ def random_point_in_bounds(bounds):
 
 def generate_event(bounds):
     """
-    Generates one valid ride event. 
-    Simulates demand surges by concentrating 40% of requests around JFK Airport.
+    Generates one ride event.
+    50% of events target the actively surging random hotspot.
+    50% of events are distributed across general background NYC traffic.
     """
-    # 40% chance to target a busy hotspot (JFK Airport approximate coordinates)
-    if random.random() < 0.40:
-        lat = random.uniform(40.640, 40.655)
-        lon = random.uniform(-73.795, -73.770)
+    update_hotspot_if_needed()
+
+    # 50% chance to target the active hotspot zone
+    if random.random() < 0.50:
+        lat = random.uniform(*current_hotspot["lat"])
+        lon = random.uniform(*current_hotspot["lon"])
         zone_id, zone_name, _ = latlon_to_zone(lat, lon)
         if zone_id is not None:
             return {
@@ -63,7 +92,7 @@ def generate_event(bounds):
                 "timestamp": datetime.now(timezone.utc).isoformat(),
             }
 
-    # Standard random generation for other zones
+    # Background random traffic across the rest of the city
     for _ in range(MAX_RETRIES):
         lat, lon = random_point_in_bounds(bounds)
         zone_id, zone_name, _ = latlon_to_zone(lat, lon)
@@ -97,6 +126,7 @@ def build_producer():
 def run():
     bounds = get_bounds()
     print(f"Zone bounds loaded: {bounds}")
+    print(f"Initial surge active at: {current_hotspot['name']}")
 
     producer = build_producer()
     sleep_interval = 1.0 / EVENTS_PER_SECOND
@@ -104,7 +134,7 @@ def run():
     sent = 0
     skipped = 0
 
-    print("Producer started. Generating synthetic ride events...")
+    print("Producer started. Generating dynamic ride events...")
     try:
         while True:
             event = generate_event(bounds)
@@ -114,7 +144,7 @@ def run():
                 producer.send(KAFKA_TOPIC, value=event)
                 producer.flush()
                 sent += 1
-                if sent % 10 == 0:
+                if sent % 25 == 0:
                     print(f"Sent {sent} events (skipped {skipped} invalid points)")
 
             time.sleep(sleep_interval)
